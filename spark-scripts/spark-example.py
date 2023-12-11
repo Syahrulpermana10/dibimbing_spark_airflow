@@ -1,68 +1,70 @@
 import pyspark
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
 
-sparkcontext = pyspark.SparkContext.getOrCreate(
-    conf=(pyspark.SparkConf().setAppName("Dibimbing"))
+# Nama host Spark Master
+spark_master_host = "dibimbing-dataeng-spark-master"
+
+# URL Spark Master
+spark_host = f"spark://{spark_master_host}:7077"
+
+# Path JAR PostgreSQL
+postgresql_jar_path = "/opt/bitnami/spark/jars/postgresql-42.2.18.jar"
+
+# Konfigurasi Spark
+spark_conf = (
+    pyspark
+    .SparkConf()
+    .setAppName('Dibimbing')
+    .setMaster(spark_host)
+    .set("spark.jars", postgresql_jar_path)
 )
+
+# Inisialisasi SparkContext
+sparkcontext = pyspark.SparkContext.getOrCreate(conf=spark_conf)
 sparkcontext.setLogLevel("WARN")
 
-spark = pyspark.sql.SparkSession(sparkcontext.getOrCreate())
+# Inisialisasi SparkSession
+spark = SparkSession(sparkcontext.getOrCreate())
 
-# define schema for purchases dataset
-purchases_schema = (
-    "order_id int, customer_id int, product_id int, quantity int, price float"
+# Database connection parameters
+db_properties = {
+    "user": "your_postgres_user",
+    "password": "your_postgres_password",
+    "driver": "org.postgresql.Driver",
+    "url": "jdbc:postgresql://dataeng-postgres:5433/your_postgres_db",
+}
+
+# Read data from PostgreSQL table
+table_name = "retail_data"
+df = spark.read.format("jdbc").option("url", db_properties["url"]).option("dbtable", table_name).option("user", db_properties["user"]).option("password", db_properties["password"]).option("driver", db_properties["driver"]).load()
+
+# Filter data based on the specified date range
+df = df.withColumn("InvoiceDate", to_date("InvoiceDate", "MM/dd/yyyy"))
+date_range_start = "2011-01-10"
+date_range_end = "2011-09-09"
+df_filtered = df.filter((col("InvoiceDate") >= date_range_start) & (col("InvoiceDate") <= date_range_end))
+
+# Churn Analysis
+churn_analysis = df_filtered.groupBy("CustomerID").agg(
+    max("InvoiceDate").alias("LastPurchaseDate")
+)
+churned_customers = churn_analysis.filter(col("LastPurchaseDate") <= date_range_start)
+
+# Output the churned customers to CSV
+output_path = "/output"
+churned_customers.write.csv(output_path + "/churned_customers", header=True)
+
+# Retention Analysis
+retention_analysis = df_filtered.groupBy("CustomerID").agg(
+    min("InvoiceDate").alias("FirstPurchaseDate"),
+    max("InvoiceDate").alias("LastPurchaseDate")
 )
 
-# create purchases dataframe
-purchases_data = [
-    (101, 1, 1, 2, 19.99),
-    (102, 2, 2, 1, 9.99),
-    (103, 3, 3, 1, 15.99),
-    (104, 1, 4, 1, 5.99),
-    (105, 2, 5, 3, 12.99),
-    (106, 3, 6, 2, 9.99),
-    (107, 4, 7, 1, 11.99),
-    (108, 1, 8, 2, 14.99),
-    (109, 2, 9, 1, 9.99),
-    (110, 3, 10, 1, 19.99),
-]
-purchases_df = spark.createDataFrame(purchases_data, schema=purchases_schema)
+retained_customers = retention_analysis.filter((col("FirstPurchaseDate") < date_range_start) & (col("LastPurchaseDate") >= date_range_end))
 
-# define schema for customers dataset
-customers_schema = "customer_id int, name string, email string"
+# Output the retained customers to CSV
+retained_customers.write.csv(output_path + "/retained_customers", header=True)
 
-# create customers dataframe
-customers_data = [
-    (1, "John Doe", "johndoe@example.com"),
-    (2, "Jane Smith", "janesmith@example.com"),
-    (3, "Bob Johnson", "bobjohnson@example.com"),
-    (4, "Sue Lee", "suelee@example.com"),
-]
-customers_df = spark.createDataFrame(customers_data, schema=customers_schema)
-
-# define schema for products dataset
-products_schema = "product_id int, name string, price float"
-
-# create products dataframe
-products_data = [
-    (1, "Product A", 19.99),
-    (2, "Product B", 9.99),
-    (3, "Product C", 15.99),
-    (4, "Product D", 5.99),
-    (5, "Product E", 12.99),
-    (6, "Product F", 9.99),
-    (7, "Product G", 11.99),
-    (8, "Product H", 14.99),
-    (9, "Product I", 9.99),
-    (10, "Product J", 19.99),
-]
-products_df = spark.createDataFrame(products_data, schema=products_schema)
-
-# set join preferences
-spark.conf.set("spark.sql.join.preferSortMergeJoin", "true")
-spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
-
-# perform sort merge join
-merged_df = purchases_df.join(customers_df, "customer_id").join(
-    products_df, "product_id"
-)
-merged_df.show()
+# Stop Spark session
+spark.stop()
